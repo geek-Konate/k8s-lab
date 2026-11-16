@@ -1,0 +1,70 @@
+---
+- name: Installation de Kubernetes K3s
+  hosts: k3s
+  become: true
+
+  tasks:
+    - name: Mettre à jour APT
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Installer les prérequis
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+        state: present
+
+    - name: Installer K3s sans Traefik
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_EXEC="--disable=traefik" sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/k3s
+
+    - name: Activer le service K3s
+      ansible.builtin.systemd:
+        name: k3s
+        enabled: true
+        state: started
+
+    - name: Attendre que Kubernetes soit prêt
+      ansible.builtin.command: >
+        /usr/local/bin/k3s kubectl wait
+        --for=condition=Ready nodes
+        --all --timeout=20s
+      register: k3s_status
+      retries: 12
+      delay: 5
+      until: k3s_status.rc == 0
+      changed_when: false
+
+    - name: Créer le dossier kubeconfig
+      ansible.builtin.file:
+        path: /home/vagrant/.kube
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: "0700"
+
+    - name: Configurer kubectl pour vagrant
+      ansible.builtin.copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/vagrant/.kube/config
+        remote_src: true
+        owner: vagrant
+        group: vagrant
+        mode: "0600"
+
+    - name: Afficher les nœuds du cluster
+      ansible.builtin.command: >
+        /usr/local/bin/k3s kubectl get nodes -o wide
+      register: nodes
+      changed_when: false
+
+    - name: Résultat du cluster
+      ansible.builtin.debug:
+        var: nodes.stdout_lines

@@ -1,0 +1,126 @@
+
+---
+# PHASE 1 : Construction et analyse de sécurité
+- name: Build and security scan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Créer le dossier des rapports
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/reports"
+        state: directory
+        mode: "0755"
+
+    - name: Construire l'image Nginx corrigée
+      ansible.builtin.command:
+        argv:
+          - podman
+          - build
+          - --pull=always
+          - -t
+          - localhost/nginx-secure:patched-1
+          - -f
+          - "{{ playbook_dir }}/Dockerfile"
+          - "{{ playbook_dir }}"
+    - name: Supprimer l'ancienne archive
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/reports/nginx-secure-patched.tar"
+        state: absent
+    - name: Exporter l'image
+      ansible.builtin.command:
+        argv:
+          - podman
+          - save
+          - --format
+          - docker-archive
+          - -o
+          - "{{ playbook_dir }}/reports/nginx-secure-patched.tar"
+          - localhost/nginx-secure:patched-1
+
+    - name: Scanner l'image avec Trivy
+      ansible.builtin.command:
+        argv:
+          - trivy
+          - image
+          - --input
+          - "{{ playbook_dir }}/reports/nginx-secure-patched.tar"
+          - --scanners
+          - vuln
+          - --severity
+          - HIGH,CRITICAL
+          - --exit-code
+          - "1"
+          - --format
+          - table
+          - --output
+          - "{{ playbook_dir }}/reports/trivy-nginx-patched.txt"
+      changed_when: false
+
+    - name: Confirmer la validation du scan
+      ansible.builtin.debug:
+        msg: "Scan valide : aucune vulnérabilité HIGH ou CRITICAL détectée."
+
+# PHASE 2 : Déploiement sur Kubernetes
+- name: Deploy secure Nginx
+  hosts: k3s
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Transférer l'image sur le nœud Kubernetes
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/reports/nginx-secure-patched.tar"
+        dest: /tmp/nginx-secure-patched.tar
+        mode: "0644"
+
+    - name: Importer l'image dans containerd
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/k3s
+          - ctr
+          - -n
+          - k8s.io
+          - images
+          - import
+          - /tmp/nginx-secure-patched.tar
+
+    - name: Copier le manifeste Kubernetes
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/k8s/app.yaml"
+        dest: /tmp/k8s-lab-app.yaml
+        mode: "0644"
+
+    - name: Appliquer le manifeste
+      ansible.builtin.command:
+        cmd: /usr/local/bin/k3s kubectl apply -f /tmp/k8s-lab-app.yaml
+      register: deploy_result
+      changed_when: >
+        'created' in deploy_result.stdout or
+        'configured' in deploy_result.stdout
+
+    - name: Redémarrer les pods pour utiliser l'image actualisée
+      ansible.builtin.command:
+        cmd: /usr/local/bin/k3s kubectl rollout restart deployment/web
+
+    - name: Attendre la fin du déploiement
+      ansible.builtin.command:
+        cmd: /usr/local/bin/k3s kubectl rollout status deployment/web --timeout=180s
+      changed_when: false
+
+    - name: Vérifier les pods
+      ansible.builtin.command:
+        cmd: /usr/local/bin/k3s kubectl get pods -l app=web -o wide
+      register: pods
+      changed_when: false
+
+    - name: Afficher les pods
+      ansible.builtin.debug:
+        var: pods.stdout_lines
+
+    - name: Supprimer l'archive temporaire du nœud
+      ansible.builtin.file:
+        path: /tmp/nginx-secure-patched.tar
+        state: absent
+

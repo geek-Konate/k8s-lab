@@ -1,0 +1,15 @@
+# Images de conteneurs exportées
+*.tar
+
+# Clés et secrets
+*.pem
+*.key
+*.vault
+.env
+
+# Fichiers temporaires
+*.retry
+*.log
+
+# Configuration locale
+.kube/
